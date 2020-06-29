@@ -10,6 +10,7 @@ from DataLoader import DataLoader
 from torchvision.transforms import ToTensor
 import random
 
+ORG = 10
 RGB = 3
 
 def torch_bernoulli(p, size):
@@ -19,7 +20,6 @@ def collapse_labels(labels, n_classes):
     """Collapse 10 classes into n_classes classes."""
     assert n_classes in [2, 3, 5, 10]
     bin_width = 10 // n_classes
-    #return (labels / bin_width).clamp(max=n_classes - 1)
     return min(int(labels / bin_width), n_classes - 1)
 
 def corrupt(labels, n_classes, prob):
@@ -28,21 +28,20 @@ def corrupt(labels, n_classes, prob):
 
     Generalizes torch_xor's role of label flipping for the binary case.
     """
-    #keep = torch_bernoulli(prob, len(labels)).bool()
     if random.random() < prob:
         return labels
     offset = random.randrange(1, n_classes)
-    #return torch.where(keep, labels, (labels + offset) % n_classes)
     return (labels + offset) % n_classes
 
 class MNIST(mnist.MNIST):
     def __init__(self, root, train=True, transform=None, target_transform=None,
-                 download=False, n_colors=2, n_classes=10, color_prob=1., label_prob=1.):
+                 download=False, n_colors=2, n_classes=10, color_prob=1., label_prob=1., ood=False):
         super(MNIST, self).__init__(root, train, transform, target_transform, download)
         self.n_colors = n_colors
         self.n_classes = n_classes
         self.color_prob = color_prob
         self.label_prob = label_prob
+        self.ood = ood
 
     def __getitem__(self, index):
         """
@@ -71,6 +70,8 @@ class MNIST(mnist.MNIST):
         img_ = torch.zeros(img.shape)
         img_ = img_.repeat((RGB,1,1))
         img_[color,:,:] = img
+        if self.ood: # set unknown color
+            img_[RGB-1,:,:] = img
 
         return img_, label
 
@@ -80,30 +81,30 @@ if __name__ == '__main__':
     n_q = 1
     test_n_s = 1
     test_n_q = 1
-    train_dataset = MNIST(root='./train', train=True, transform=ToTensor(), color_prob=0.9)
-    test_dataset = MNIST(root='./test', train=False, transform=ToTensor(), color_prob=0.1)
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, max_spl_per_cls=6000, nDataLoaderThread=5, gSize=n_s+n_q, maxQueueSize=500)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, max_spl_per_cls=1000, nDataLoaderThread=5, gSize=test_n_s+test_n_q, maxQueueSize=500)
+    train_ind = MNIST(root='./train', train=True, transform=ToTensor(), color_prob=0.9)
+    test_ind = MNIST(root='./test', train=False, transform=ToTensor(), color_prob=0.9) # ind colors same as training
+    test_ood = MNIST(root='./test', train=False, transform=ToTensor(), color_prob=0.5, ood=True) # ood colors
+    test_unk = MNIST(root='./test', train=False, transform=ToTensor(), n_colors=3, color_prob=0.5) # there are an unknown color
+    train_loader = DataLoader(train_ind, batch_size=batch_size, max_spl_per_cls=6000, nDataLoaderThread=5, gSize=n_s+n_q, maxQueueSize=500)
+    ind_loader = DataLoader(test_ind, batch_size=batch_size, max_spl_per_cls=1000, nDataLoaderThread=5, gSize=test_n_s+test_n_q, maxQueueSize=500)
+    ood_loader = DataLoader(test_ood, batch_size=batch_size, max_spl_per_cls=1000, nDataLoaderThread=5, gSize=test_n_s+test_n_q, maxQueueSize=500)
+    unk_loader = DataLoader(test_unk, batch_size=batch_size, max_spl_per_cls=1000, nDataLoaderThread=5, gSize=test_n_s+test_n_q, maxQueueSize=500)
     model = Model().cuda()
-    epoch = 100
-    interval = 10
+    epoch = 50
+    interval = 5
 
     for _epoch in range(1,epoch+1):
-        prec = model.fit(loader=train_loader, n_s=n_s, n_q=n_q).item()
+        prec = model.fit(loader=train_loader, n_s=n_s, n_q=n_q, prefix="train").item()
         print('TRAIN epoch {}, accuracy: {:.2f}'.format(_epoch, prec))
 
         if _epoch % interval == 0:
-            prec = model.infer(loader=test_loader, n_s=test_n_s, n_q=test_n_q).item()
-            print('TEST accuracy: {:.2f}'.format(_epoch, prec))
-        # correct = 0
-        # _sum = 0
+            print('='*80)
+            prec = model.infer(loader=ind_loader, n_s=test_n_s, n_q=test_n_q, prefix="ind").item()
+            print('IND epoch {}, accuracy: {:.2f}'.format(_epoch, prec))
 
-        # for idx, (test_x, test_label) in enumerate(test_loader):
-        #     predict_y = model(test_x.float().cuda()).detach().cpu()
-        #     predict_ys = np.argmax(predict_y, axis=-1)
-        #     _ = predict_ys == test_label
-        #     correct += np.sum(_.numpy(), axis=-1)
-        #     _sum += _.shape[0]
+            prec = model.infer(loader=ood_loader, n_s=test_n_s, n_q=test_n_q, prefix="ood").item()
+            print('OOD epoch {}, accuracy: {:.2f}'.format(_epoch, prec))
 
-        # print('epoch {}, accuracy: {:.2f}'.format(_epoch, correct / _sum))
-        # torch.save(model, 'models/mnist_{:.2f}.pkl'.format(correct / _sum))
+            prec = model.infer(loader=unk_loader, n_s=test_n_s, n_q=test_n_q, prefix="unk").item()
+            print('UNK epoch {}, accuracy: {:.2f}'.format(_epoch, prec))
+            print('='*80)
