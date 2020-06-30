@@ -6,7 +6,6 @@ from torch import nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.distributions.multivariate_normal import MultivariateNormal
-import matplotlib.pyplot as plt
 
 class Net(Module):
     def __init__(self):
@@ -76,18 +75,6 @@ class Loss(nn.Module):
 
         return nloss, prec1   
 
-def draw(X, Y, prefix, n=2):
-    fig = plt.figure(figsize=(n**2, n**2))
-    for i, (X_, y_) in enumerate(zip(X, Y)):
-        for k in range(n):
-            plt.subplot(n*2,5,i*n+1+k)
-            plt.imshow(X_[k].permute([1,2,0]), interpolation='none')
-            plt.title("CLS: {}".format(k, y_.item()))
-            plt.xticks([])
-            plt.yticks([])
-    plt.savefig("{}.png".format(prefix), dpi=fig.dpi)
-    plt.close()
-    
 class Model(nn.Module):
     def __init__(self, n_s=1, n_q=1):
         super(Model, self).__init__()
@@ -118,7 +105,7 @@ class Model(nn.Module):
         l, p = self.loss(x, y, n_s, n_q)
         return l, p
         
-    def fit(self, loader, n_s, n_q, prefix="train"):
+    def fit(self, loader, n_s, n_q):
         
         self.train();
         
@@ -129,8 +116,6 @@ class Model(nn.Module):
         # it is same for every batch
         y_ = [c for c in range(loader.batch_size)]
         for idx, (x, y) in enumerate(loader, 1):
-            # if idx % interval == 0:
-            #     draw(x,y,"{}.{}".format(prefix, idx))
             tstart = time.time()
 
             l, p = self.compute_loss(x, y_, n_s, n_q)
@@ -153,7 +138,7 @@ class Model(nn.Module):
 
         return top1 / idx
 
-    def infer(self, loader, n_s, n_q, prefix="ind"):
+    def infer(self, loader, n_s, n_q):
         self.eval();
         
         loss = 0
@@ -163,8 +148,6 @@ class Model(nn.Module):
         # it is same for every batch
         y_ = [c for c in range(loader.batch_size)]
         for idx, (x, y) in enumerate(loader, 1):
-            # if idx % interval == 0:
-            #     draw(x,y,"{}.{}".format(prefix, idx))
             tstart = time.time()
 
             l, p = self.compute_loss(x, y_, n_s, n_q)

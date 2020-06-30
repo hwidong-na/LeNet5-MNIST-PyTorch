@@ -1,85 +1,29 @@
 from model import Model
-import numpy as np
-from PIL import Image
-import torch
-from torchvision.datasets import mnist
-# from torch.nn import CrossEntropyLoss
-# from torch.optim import SGD
-# from torch.utils.data import DataLoader
+from ColoredMNIST import MNIST
 from DataLoader import DataLoader
 from torchvision.transforms import ToTensor
-import random
+import matplotlib.pyplot as plt
 
-ORG = 10
-RGB = 3
-
-def torch_bernoulli(p, size):
-    return (torch.rand(size) < p).float()
-
-def collapse_labels(labels, n_classes):
-    """Collapse 10 classes into n_classes classes."""
-    assert n_classes in [2, 3, 5, 10]
-    bin_width = 10 // n_classes
-    return min(int(labels / bin_width), n_classes - 1)
-
-def corrupt(labels, n_classes, prob):
-    """Corrupt a fraction of labels by shifting it + o (mod n_classes),
-    according to bernoulli(prob), where o is a random offset
-
-    Generalizes torch_xor's role of label flipping for the binary case.
-    """
-    if random.random() < prob:
-        return labels
-    offset = random.randrange(1, n_classes)
-    return (labels + offset) % n_classes
-
-class MNIST(mnist.MNIST):
-    def __init__(self, root, train=True, transform=None, target_transform=None,
-                 download=False, n_colors=2, n_classes=10, color_prob=1., label_prob=1., ood=False):
-        super(MNIST, self).__init__(root, train, transform, target_transform, download)
-        self.n_colors = n_colors
-        self.n_classes = n_classes
-        self.color_prob = color_prob
-        self.label_prob = label_prob
-        self.ood = ood
-
-    def __getitem__(self, index):
-        """
-        Args:
-            index (int): Index
-
-        Returns:
-            tuple: (image, target) where target is index of the target class.
-        """
-        img, target = self.data[index], int(self.targets[index])
-
-        # doing this so that it is consistent with all other datasets
-        # to return a PIL Image
-        img = Image.fromarray(img.numpy(), mode='L')
-
-        if self.transform is not None:
-            img = self.transform(img)
-
-        if self.target_transform is not None:
-            target = self.target_transform(target)
-
-        color = collapse_labels(target, self.n_colors)
-        color = corrupt(color, self.n_colors, self.color_prob)
-        label = collapse_labels(target, self.n_classes)
-        label = corrupt(label, self.n_classes, self.label_prob)
-        img_ = torch.zeros(img.shape)
-        img_ = img_.repeat((RGB,1,1))
-        img_[color,:,:] = img
-        if self.ood: # set unknown color
-            img_[RGB-1,:,:] = img
-
-        return img_, label
-
+def draw(loader, prefix, n=2, interval=100):
+    fig = plt.figure(figsize=(n**2, n**2))
+    for idx, (X, Y) in enumerate(loader):
+        if idx % interval == 0:
+            for c, (X_, y_) in enumerate(zip(X, Y)):
+                for k in range(n):
+                    plt.subplot(n*2,5,c*n+k+1) # one-based index
+                    plt.imshow(X_[k].permute([1,2,0]), interpolation='none')
+                    plt.title("CLS: {}".format(k, y_.item()))
+                    plt.xticks([])
+                    plt.yticks([])
+            fig.tight_layout()
+            plt.savefig("{}-{}.png".format(prefix,idx), dpi=fig.dpi)
+            plt.close()
+    
 if __name__ == '__main__':
     batch_size = 10 #256
-    n_s = 1
+    n_s = 3
     n_q = 1
-    test_n_s = 1
+    test_n_s = 3
     test_n_q = 1
     train_ind = MNIST(root='./train', train=True, transform=ToTensor(), color_prob=0.9)
     test_ind = MNIST(root='./test', train=False, transform=ToTensor(), color_prob=0.9) # ind colors same as training
@@ -89,22 +33,27 @@ if __name__ == '__main__':
     ind_loader = DataLoader(test_ind, batch_size=batch_size, max_spl_per_cls=1000, nDataLoaderThread=5, gSize=test_n_s+test_n_q, maxQueueSize=500)
     ood_loader = DataLoader(test_ood, batch_size=batch_size, max_spl_per_cls=1000, nDataLoaderThread=5, gSize=test_n_s+test_n_q, maxQueueSize=500)
     unk_loader = DataLoader(test_unk, batch_size=batch_size, max_spl_per_cls=1000, nDataLoaderThread=5, gSize=test_n_s+test_n_q, maxQueueSize=500)
+    draw(train_loader, "train", n=n_s+n_q, interval=100)
+    draw(ind_loader, "ind", n=test_n_s+test_n_q, interval=50)
+    draw(ood_loader, "ood", n=test_n_s+test_n_q, interval=50)
+    draw(unk_loader, "unk", n=test_n_s+test_n_q, interval=50)
+
     model = Model().cuda()
     epoch = 50
     interval = 5
 
     for _epoch in range(1,epoch+1):
-        prec = model.fit(loader=train_loader, n_s=n_s, n_q=n_q, prefix="train").item()
+        prec = model.fit(loader=train_loader, n_s=n_s, n_q=n_q).item()
         print('TRAIN epoch {}, accuracy: {:.2f}'.format(_epoch, prec))
 
         if _epoch % interval == 0:
             print('='*80)
-            prec = model.infer(loader=ind_loader, n_s=test_n_s, n_q=test_n_q, prefix="ind").item()
+            prec = model.infer(loader=ind_loader, n_s=test_n_s, n_q=test_n_q).item()
             print('IND epoch {}, accuracy: {:.2f}'.format(_epoch, prec))
 
-            prec = model.infer(loader=ood_loader, n_s=test_n_s, n_q=test_n_q, prefix="ood").item()
+            prec = model.infer(loader=ood_loader, n_s=test_n_s, n_q=test_n_q).item()
             print('OOD epoch {}, accuracy: {:.2f}'.format(_epoch, prec))
 
-            prec = model.infer(loader=unk_loader, n_s=test_n_s, n_q=test_n_q, prefix="unk").item()
+            prec = model.infer(loader=unk_loader, n_s=test_n_s, n_q=test_n_q).item()
             print('UNK epoch {}, accuracy: {:.2f}'.format(_epoch, prec))
             print('='*80)
