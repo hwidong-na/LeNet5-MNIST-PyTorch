@@ -27,13 +27,15 @@ def corrupt(labels, n_classes, prob):
 
 class MNIST(mnist.MNIST):
     def __init__(self, root, train=True, transform=None, target_transform=None,
-                 download=False, n_colors=2, n_classes=10, color_prob=1., label_prob=1., ood=False):
+                 download=False, n_colors=2, n_classes=10, color_prob=1., label_prob=1., 
+                 ood=False, ulb=False):
         super(MNIST, self).__init__(root, train, transform, target_transform, download)
         self.n_colors = n_colors
         self.n_classes = n_classes
         self.color_prob = color_prob
         self.label_prob = label_prob
         self.ood = ood
+        self.ulb = ulb
 
     def __getitem__(self, index):
         """
@@ -65,5 +67,7 @@ class MNIST(mnist.MNIST):
         if self.ood: # set unknown color
             img_[RGB-1,:,:] = img
 
+        if self.ulb:
+           label = index 
         return img_, label
 
