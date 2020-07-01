@@ -76,22 +76,38 @@ class Loss(nn.Module):
 
         return nloss, prec1   
 
+
 class Model(nn.Module):
-    def __init__(self):
-        super(Model, self).__init__()
+    def __init__(self, **kwarg):
+        super(Model, self).__init__(**kwarg)
 
         self.loss = Loss()
         self.net = Net()
         self.optimizer = optim.SGD(self.parameters(), lr=0.001, momentum=0.9)
+        # self.optimizer = optim.Adam(self.parameters(), lr=0.0001)
+        self.it = 1 # one-based index
     
-    def compute_loss(self, x, y, n_s, n_q):
+    def transform(self, x, y):
         if not isinstance(x, torch.Tensor):
             x = torch.FloatTensor(x)
         if not isinstance(y, torch.Tensor):
             y = torch.LongTensor(y)
         if next(self.parameters()).is_cuda:
             x = x.cuda()
-            y = y.cuda()
+            y = y.cuda()        
+        return x, y
+
+    def updateLearningRate(self, alpha):
+
+        learning_rate = []
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = param_group['lr']*alpha
+            learning_rate.append(param_group['lr'])
+
+        return learning_rate;
+
+    def compute_loss(self, x, y, n_s, n_q):
+        x, y = self.transform(x,y)
         s = x.shape
         x = x.reshape([s[0]*s[1]]+list(s[2:]))
         x, h = self.net(x)
@@ -159,10 +175,11 @@ class Model(nn.Module):
         return top1 / idx
 
 class SelfTaughtModel(Model):
-    def __init__(self, uloader, **kwarg):
-        super(SelfTaughtModel, self).__init__()
+    def __init__(self, uloader, pre, **kwarg):
+        super(SelfTaughtModel, self).__init__(**kwarg)
         self.uloader = uloader
         self.uiter = iter(uloader)
+        self.pre = pre
         
     def farthest(self, dist, N):
         perm = []
@@ -180,17 +197,10 @@ class SelfTaughtModel(Model):
         return torch.LongTensor(perm)
     
     def compute_loss_st(self, x, y, N, n_s, n_q):
-        if not isinstance(x, torch.Tensor):
-            x = torch.FloatTensor(x)
-        if not isinstance(y, torch.Tensor):
-            y = torch.LongTensor(y)
-        if next(self.parameters()).is_cuda:
-            x = x.cuda()
-            y = y.cuda()
-            
+        x, y = self.transform(x,y)
         U, M = x.shape[:2]
-        x = x.reshape([U*M]+list(x.shape[2:]))
-        u, h = self.net(x) #(batch,seg,dim)
+        u = x.reshape([U*M]+list(x.shape[2:]))
+        u, h = self.net(u) #(batch,seg,dim)
         u = u.reshape([U,M]+list(u.shape[1:]))
         q = u[:,n_s:n_s+n_q].reshape([U*n_q, -1])
         s = u[:,:n_s].mean(dim=1)
@@ -239,6 +249,9 @@ class SelfTaughtModel(Model):
             sys.stdout.write("Q:(%d/%d)"%(loader.qsize(), loader.maxQueueSize));
             sys.stdout.flush();
 
+            if self.it <= self.pre:
+                continue
+
             try:
                 u, _ = next(self.uiter)
             except StopIteration:
@@ -265,6 +278,7 @@ class SelfTaughtModel(Model):
             sys.stdout.write("Q:(%d/%d)"%(uloader.qsize(), uloader.maxQueueSize));
             sys.stdout.flush();
 
+        self.it += 1
         sys.stdout.write("\n");
 
         return top1 / idx
@@ -276,3 +290,75 @@ class SelfTaughtModel(Model):
                 next(self.uiter)
             except StopIteration:
                 self.uiter = None
+                self.it = 1
+
+class MixupLoss(Loss):
+    def __init__(self):
+        super(MixupLoss, self).__init__()
+
+    def forward(self, x, mixup_label, label, n_s, n_q):
+        assert x.size(1) > 1
+        out_anchor      = torch.mean(x[:,:n_s,:],1)
+        stepsize        = out_anchor.size()[0]
+        out_positive    = x[:,n_s:n_s+n_q,:].reshape([stepsize*n_q, -1])
+        
+        pos = out_positive.unsqueeze(-1).expand(-1,-1,stepsize)
+        anc = out_anchor.unsqueeze(-1).expand(-1,-1,stepsize*n_q).transpose(0,2)
+        sim_matrix = -1 * F.pairwise_distance(pos, anc) #(batch*n,batch)
+
+        # \deriv_w kld(p, q) = - \deriv w p log q
+        N = sim_matrix.size(0)
+        mixup_label = mixup_label.unsqueeze(1).expand(-1,n_q,-1).reshape([N,-1])
+        nloss       = -1 * (mixup_label * F.log_softmax(sim_matrix, dim=-1)).sum() / N
+        label       = label.unsqueeze(-1).expand(-1,n_q).reshape([N])
+        prec1       = accuracy(sim_matrix.detach().cpu(), label.detach().cpu(), topk=(1, ))
+
+        return nloss, prec1
+    
+class MixupModel(Model):
+    def __init__(self, alpha, **kwarg):
+        super(MixupModel, self).__init__(**kwarg)
+        self.beta = torch.distributions.Beta(alpha,alpha)
+        self.mixup_loss = MixupLoss()
+
+    def mixup(self, x):
+        N, M = x.shape[:2]
+        offset = random.randrange(1,N)
+        perm = (torch.arange(N)+offset)%N
+        lambda_ = self.beta.sample()
+        lambda_ = torch.max(lambda_, 1-lambda_) # for computing accuracy
+        x = lambda_*x + (1-lambda_)*x[perm]
+        y = F.one_hot(torch.arange(N), N).cuda()
+        y = lambda_*y + (1-lambda_)*y[perm]
+        x = x.reshape([N*M]+list(x.shape[2:]))
+        x, h = self.net(x) #(batch,seg,nOut)
+        x = x.reshape([N,M]+list(x.shape[1:]))
+        return x, y
+
+    def compute_loss(self, x, y, n_s, n_q):
+        x, y = self.transform(x,y)
+        x, m = self.mixup(x)
+        l, p = self.mixup_loss(x,m,y,n_s,n_q)
+        return l, p
+
+class SelfTaughtMixupModel(MixupModel, SelfTaughtModel):
+    def __init__(self, uloader, pre, alpha, **kwarg):
+        super(SelfTaughtMixupModel, self).__init__(uloader=uloader, pre=pre, alpha=alpha, **kwarg)
+        
+    def compute_loss_st(self, x, y, N, n_s, n_q):
+        x, y = self.transform(x, y)
+        U, M = x.shape[:2]
+        u = x.reshape([U*M]+list(x.shape[2:]))
+        u, h = self.net(u) #(batch,seg,dim)
+        u = u.reshape([U,M]+list(u.shape[1:]))
+        q = u[:,n_s:n_s+n_q].reshape([U*n_q, -1])
+        s = u[:,:n_s].mean(dim=1)
+        pos = q.unsqueeze(-1).repeat(1,1,U)
+        anc = s.unsqueeze(-1).repeat(1,1,U*n_q).transpose(0,2)
+        dist = F.pairwise_distance(pos,anc) #(batch*n_q, batch)
+        dist = dist.reshape([U, n_q, U]).mean(dim=1) #(batch, batch)
+
+        perm = self.farthest(dist, N)
+        x, m = self.mixup(x[perm])
+        l, p = self.mixup_loss(x,m,y,n_s,n_q)
+        return l, p

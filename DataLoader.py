@@ -25,13 +25,12 @@ def round_down(num, divisor):
     return num - (num%divisor)
 
 class DataLoader(object):
-    def __init__(self, dataset, batch_size, max_spl_per_cls, nDataLoaderThread, gSize, maxQueueSize = 10, eval=False, **kwargs):
+    def __init__(self, dataset, batch_size, max_spl_per_cls, nDataLoaderThread, gSize, maxQueueSize = 10, **kwargs):
         self.dataset = dataset;
         self.nWorkers = nDataLoaderThread;
         self.max_spl_per_cls = max_spl_per_cls;
         self.batch_size = batch_size;
         self.maxQueueSize = maxQueueSize;
-        self.eval = eval
 
         self.data_dict = {};
         self.data_list = [];
